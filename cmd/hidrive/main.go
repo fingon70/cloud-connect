@@ -12,6 +12,7 @@ import (
 	"github.com/fingon70/cloud-connect/internal/api"
 	"github.com/fingon70/cloud-connect/internal/auth"
 	"github.com/fingon70/cloud-connect/internal/config"
+	"github.com/fingon70/cloud-connect/internal/sync"
 	"github.com/fingon70/cloud-connect/internal/ui"
 )
 
@@ -158,7 +159,14 @@ func handleSync(args []string) {
 		os.Exit(2)
 	}
 
-	fmt.Fprintf(os.Stderr, "sync %s -> %s (dry-run=%t): not implemented yet\n", fs.Arg(0), fs.Arg(1), *dryRun)
+	token := loadValidToken()
+	client := api.NewClient(api.DefaultBaseURL(), token.AccessToken)
+	remotePath := resolvePath(context.Background(), client, fs.Arg(0))
+	syncer := sync.Syncer{Client: client}
+	if err := syncer.Sync(context.Background(), remotePath, fs.Arg(1), sync.Options{DryRun: *dryRun}); err != nil {
+		ui.Errorf("sync failed: %v", err)
+		os.Exit(1)
+	}
 }
 
 func handleWhoAmI(args []string) {
@@ -198,9 +206,14 @@ func resolvePath(ctx context.Context, client *api.Client, path string) string {
 	if path == "/" {
 		return path
 	}
-	if strings.HasPrefix(path, "/") && strings.Count(path, "/") == 1 {
-		alias := strings.TrimPrefix(path, "/")
-		if alias == "" || alias == "users" || alias == "public" || alias == ".appdata" {
+	if strings.HasPrefix(path, "/") {
+		trimmed := strings.TrimPrefix(path, "/")
+		if trimmed == "" {
+			return path
+		}
+		parts := strings.SplitN(trimmed, "/", 2)
+		alias := parts[0]
+		if alias == "users" || alias == "public" || alias == ".appdata" {
 			return path
 		}
 		user, err := client.GetUser(ctx)
@@ -208,7 +221,10 @@ func resolvePath(ctx context.Context, client *api.Client, path string) string {
 			return path
 		}
 		if user.Alias == alias {
-			return "/users/" + alias
+			if len(parts) == 1 {
+				return "/users/" + alias
+			}
+			return "/users/" + alias + "/" + parts[1]
 		}
 	}
 	return path
