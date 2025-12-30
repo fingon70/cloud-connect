@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +53,49 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+func Save(cfg Config) error {
+	path, err := DefaultConfigPath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0o600)
+}
+
+func PromptMissing(cfg *Config, in io.Reader, out io.Writer) (bool, error) {
+	changed := false
+	reader := bufio.NewReader(in)
+
+	if strings.TrimSpace(cfg.ClientID) == "" {
+		value, err := promptRequired(reader, out, "HiDrive client ID")
+		if err != nil {
+			return false, err
+		}
+		cfg.ClientID = value
+		changed = true
+	}
+
+	if strings.TrimSpace(cfg.ClientSecret) == "" {
+		value, err := promptRequired(reader, out, "HiDrive client secret")
+		if err != nil {
+			return false, err
+		}
+		cfg.ClientSecret = value
+		changed = true
+	}
+
+	return changed, nil
+}
+
 func applyEnv(cfg *Config) {
 	if value, ok := os.LookupEnv("HIDRIVE_CLIENT_ID"); ok {
 		cfg.ClientID = value
@@ -62,6 +108,25 @@ func applyEnv(cfg *Config) {
 	}
 	if value, ok := os.LookupEnv("HIDRIVE_SCOPES"); ok {
 		cfg.Scopes = splitCSV(value)
+	}
+}
+
+func promptRequired(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+	for {
+		if _, err := fmt.Fprintf(out, "%s: ", label); err != nil {
+			return "", err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		value := strings.TrimSpace(line)
+		if value != "" {
+			return value, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("input required")
+		}
 	}
 }
 

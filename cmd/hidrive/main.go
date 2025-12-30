@@ -62,6 +62,15 @@ func handleAuth(args []string) {
 			ui.Errorf("failed to load config: %v", err)
 			os.Exit(1)
 		}
+		if updated, err := config.PromptMissing(&cfg, os.Stdin, os.Stdout); err != nil {
+			ui.Errorf("failed to read config values: %v", err)
+			os.Exit(1)
+		} else if updated {
+			if err := config.Save(cfg); err != nil {
+				ui.Errorf("failed to save config: %v", err)
+				os.Exit(1)
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -195,11 +204,29 @@ func loadValidToken() auth.Token {
 		ui.Errorf("failed to load token: %v", err)
 		os.Exit(1)
 	}
-	if err := auth.HasValidToken(token, time.Now()); err != nil {
+	now := time.Now()
+	if err := auth.HasValidToken(token, now); err == nil {
+		return token
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		ui.Errorf("failed to load config: %v", err)
+		os.Exit(1)
+	}
+
+	refreshed, err := auth.Refresh(context.Background(), cfg, token)
+	if err != nil {
 		ui.Errorf("token invalid: %v (run: hidrive auth login)", err)
 		os.Exit(1)
 	}
-	return token
+
+	if err := auth.SaveToken(refreshed); err != nil {
+		ui.Errorf("failed to save refreshed token: %v", err)
+		os.Exit(1)
+	}
+
+	return refreshed
 }
 
 func resolvePath(ctx context.Context, client *api.Client, path string) string {
