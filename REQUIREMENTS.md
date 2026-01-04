@@ -42,6 +42,8 @@ This document captures the prerequisites and setup needed before developing or u
 - Can authenticate via API and obtain an access token.
 - Can list root directory (`/`) and nested paths.
 - Can download a single file to the local target.
+- Can sync a remote folder to a local root with hash-based change detection.
+- Can generate a report JSON and optionally delete local files missing on remote.
 
 ## Hash Strategy (MVP)
 HiDrive exposes content and metadata hashes that can be requested via `fields` on `GET /dir` or `GET /meta`.
@@ -57,3 +59,9 @@ Decision logic:
 
 Future considerations:
 - For local -> remote, decide whether to implement local hash generation or upload entire files on change.
+
+## Current Implementation Notes
+- Sync state stored at `~/.config/hidrive-cli/state.json`.
+- `--report` produces a JSON summary with counts plus `conflicts_list` and `errors_list`.
+- `--delete` prunes local files and directories that are missing remotely.
+- Sync continues on per-file errors and returns a final error if any occurred.

@@ -65,3 +65,10 @@ Go 1.22+ recommended.
 Common workflows (once commands exist):
 - `go test ./...`
 - `go run ./cmd/hidrive ls /`
+
+## Current State (Remote -> Local)
+- Sync uses HiDrive `chash`/`mhash` to detect remote changes; no local hash generation yet.
+- Sync state stored at `~/.config/hidrive-cli/state.json`.
+- Paths under `/users/<alias>` map to the local root (for example `/users/<alias>/00_INBOX` -> `~/hidrive-sync/00_INBOX`).
+- `--report` writes a JSON summary including conflicts and errors.
+- `--delete` removes local entries missing on the remote path.
