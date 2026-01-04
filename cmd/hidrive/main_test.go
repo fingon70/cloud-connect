@@ -3,13 +3,16 @@ package main
 import "testing"
 
 func TestParseSyncArgsAllowsInterspersedFlags(t *testing.T) {
-	args := []string{"/remote", "/local", "--report", "out.json", "--dry-run"}
+	args := []string{"/remote", "/local", "--report", "out.json", "--delete", "--dry-run"}
 	parsed, err := parseSyncArgs(args)
 	if err != nil {
 		t.Fatalf("parseSyncArgs error: %v", err)
 	}
 	if !parsed.DryRun {
 		t.Fatalf("expected DryRun true")
+	}
+	if !parsed.Delete {
+		t.Fatalf("expected Delete true")
 	}
 	if parsed.ReportPath != "out.json" {
 		t.Fatalf("expected report path out.json, got %q", parsed.ReportPath)

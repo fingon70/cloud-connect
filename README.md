@@ -40,7 +40,7 @@ Browse:
 
 Sync:
 - `hidrive sync /Photos ~/hidrive-sync` – download-only mirror.
-- Flags: `--dry-run`, `--report`, `--exclude`, `--include`, `--delete` (optional).
+- Flags: `--dry-run`, `--delete`, `--report`, `--exclude`, `--include` (optional).
 
 ## Sync Safety (MVP)
 The HiDrive API exposes hashes for file content and metadata. For the first release we use remote hashes
@@ -52,9 +52,12 @@ Behavior:
 - Remote unchanged: skip.
 - Local layout mirrors the remote path under the chosen local root (for example `/Photos` becomes `~/hidrive-sync/Photos`).
 - Paths under `/users/<alias>` are treated as the user root, so `/users/<alias>/00_INBOX` becomes `~/hidrive-sync/00_INBOX`.
+- `--delete` removes local files and directories not present in the remote listing.
+- Sync continues on per-file errors and reports them in the summary/report.
 
 Reporting:
 - `--report /path/to/report.json` writes a JSON summary with counts and conflict paths.
+  - Includes `deleted` and `errors` counts plus `conflicts_list` and `errors_list` arrays when relevant.
 
 ## Development
 Go 1.22+ recommended.

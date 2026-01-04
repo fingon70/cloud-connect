@@ -46,7 +46,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  hidrive auth login")
 	fmt.Fprintln(os.Stderr, "  hidrive auth status")
 	fmt.Fprintln(os.Stderr, "  hidrive ls <remote-path> [--long] [--json] [--recursive]")
-	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--report <path>]")
+	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--delete] [--report <path>]")
 	fmt.Fprintln(os.Stderr, "  hidrive whoami")
 }
 
@@ -179,6 +179,7 @@ func handleSync(args []string) {
 	}
 	if err := syncer.Sync(context.Background(), remotePath, parsed.Positional[1], sync.Options{
 		DryRun:     parsed.DryRun,
+		Delete:     parsed.Delete,
 		ReportPath: expandedReportPath,
 	}); err != nil {
 		ui.Errorf("sync failed: %v", err)
@@ -284,6 +285,7 @@ func expandPath(path string) (string, error) {
 
 type syncArgs struct {
 	DryRun     bool
+	Delete     bool
 	ReportPath string
 	Positional []string
 }
@@ -295,6 +297,8 @@ func parseSyncArgs(args []string) (syncArgs, error) {
 		switch {
 		case arg == "--dry-run":
 			parsed.DryRun = true
+		case arg == "--delete":
+			parsed.Delete = true
 		case arg == "--report":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("missing value for --report")

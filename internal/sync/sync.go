@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 
 type Options struct {
 	DryRun     bool
+	Delete     bool
 	ReportPath string
 }
 
@@ -35,7 +38,10 @@ type syncReport struct {
 	Downloaded    int      `json:"downloaded"`
 	Skipped       int      `json:"skipped"`
 	Conflicts     int      `json:"conflicts"`
+	Deleted       int      `json:"deleted"`
+	Errors        int      `json:"errors"`
 	ConflictPaths []string `json:"conflicts_list,omitempty"`
+	ErrorPaths    []string `json:"errors_list,omitempty"`
 }
 
 func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Options) error {
@@ -68,6 +74,10 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 	}
 
 	report := syncReport{}
+	keep := map[string]struct{}{}
+	if opts.Delete {
+		keep[localBase] = struct{}{}
+	}
 
 	for _, entry := range entries {
 		rel := relPath(remotePath, entry.Path)
@@ -77,13 +87,23 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 		localPath := filepath.Join(localBase, rel)
 		switch entry.Type {
 		case model.EntryFolder:
+			if opts.Delete {
+				addKeepPaths(keep, localBase, localPath)
+			}
 			if err := s.ensureDir(localPath, opts); err != nil {
-				return err
+				report.Errors++
+				report.ErrorPaths = append(report.ErrorPaths, entry.Path+": "+err.Error())
+				continue
 			}
 		case model.EntryFile:
+			if opts.Delete {
+				addKeepPaths(keep, localBase, localPath)
+			}
 			outcome, err := s.syncFile(ctx, entry, localPath, opts, state)
 			if err != nil {
-				return err
+				report.Errors++
+				report.ErrorPaths = append(report.ErrorPaths, entry.Path+": "+err.Error())
+				continue
 			}
 			switch outcome {
 			case outcomeDownloaded:
@@ -97,6 +117,15 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 		}
 	}
 
+	if opts.Delete {
+		deleted, deleteErrors := s.pruneLocal(localBase, keep, remotePath, state, opts)
+		report.Deleted += deleted
+		if len(deleteErrors) > 0 {
+			report.Errors += len(deleteErrors)
+			report.ErrorPaths = append(report.ErrorPaths, deleteErrors...)
+		}
+	}
+
 	if err := SaveState(state); err != nil {
 		return err
 	}
@@ -107,7 +136,11 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 		}
 	}
 
-	ui.Infof("sync summary: downloaded=%d skipped=%d conflicts=%d", report.Downloaded, report.Skipped, report.Conflicts)
+	ui.Infof("sync summary: downloaded=%d skipped=%d conflicts=%d deleted=%d errors=%d",
+		report.Downloaded, report.Skipped, report.Conflicts, report.Deleted, report.Errors)
+	if report.Errors > 0 {
+		return errors.New("sync completed with errors")
+	}
 	return nil
 }
 
@@ -340,6 +373,85 @@ func relPath(root, full string) string {
 	}
 	trimmed := strings.TrimPrefix(full, root)
 	return strings.TrimPrefix(trimmed, "/")
+}
+
+func addKeepPaths(keep map[string]struct{}, base, target string) {
+	if keep == nil {
+		return
+	}
+	if target == "" {
+		return
+	}
+	if base != "" {
+		keep[base] = struct{}{}
+	}
+	keep[target] = struct{}{}
+	parent := filepath.Dir(target)
+	for parent != "." && parent != string(filepath.Separator) && parent != base {
+		keep[parent] = struct{}{}
+		next := filepath.Dir(parent)
+		if next == parent {
+			break
+		}
+		parent = next
+	}
+	if base != "" {
+		keep[base] = struct{}{}
+	}
+}
+
+type deleteCandidate struct {
+	path  string
+	isDir bool
+}
+
+func (s *Syncer) pruneLocal(localBase string, keep map[string]struct{}, remoteRoot string, state *SyncState, opts Options) (int, []string) {
+	if localBase == "" {
+		return 0, []string{"local base path is empty"}
+	}
+	var candidates []deleteCandidate
+	err := filepath.WalkDir(localBase, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == localBase {
+			return nil
+		}
+		if _, ok := keep[current]; ok {
+			return nil
+		}
+		candidates = append(candidates, deleteCandidate{path: current, isDir: entry.IsDir()})
+		return nil
+	})
+	if err != nil {
+		return 0, []string{err.Error()}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return len(candidates[i].path) > len(candidates[j].path)
+	})
+
+	deleted := 0
+	var errs []string
+	for _, candidate := range candidates {
+		if opts.DryRun {
+			ui.Infof("delete %s", candidate.path)
+			deleted++
+			continue
+		}
+		if err := os.Remove(candidate.path); err != nil {
+			errs = append(errs, candidate.path+": "+err.Error())
+			continue
+		}
+		deleted++
+		if !candidate.isDir && state != nil {
+			if rel, err := filepath.Rel(localBase, candidate.path); err == nil && rel != "." && rel != "" {
+				remotePath := path.Join(remoteRoot, filepath.ToSlash(rel))
+				delete(state.Files, remotePath)
+			}
+		}
+	}
+	return deleted, errs
 }
 
 func writeReport(path string, report syncReport) error {
