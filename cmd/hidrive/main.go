@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  hidrive auth login")
 	fmt.Fprintln(os.Stderr, "  hidrive auth status")
 	fmt.Fprintln(os.Stderr, "  hidrive ls <remote-path> [--long] [--json] [--recursive]")
-	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run]")
+	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--report <path>]")
 	fmt.Fprintln(os.Stderr, "  hidrive whoami")
 }
 
@@ -156,23 +157,30 @@ func handleLs(args []string) {
 }
 
 func handleSync(args []string) {
-	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "preview changes without writing files")
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
+	parsed, err := parseSyncArgs(args)
+	if err != nil {
+		ui.Errorf("sync argument error: %v", err)
 		os.Exit(2)
 	}
 
-	if fs.NArg() < 2 {
+	if len(parsed.Positional) < 2 {
 		fmt.Fprintln(os.Stderr, "sync requires <remote-path> and <local-dir>")
 		os.Exit(2)
 	}
 
 	token := loadValidToken()
 	client := api.NewClient(api.DefaultBaseURL(), token.AccessToken)
-	remotePath := resolvePath(context.Background(), client, fs.Arg(0))
+	remotePath := resolvePath(context.Background(), client, parsed.Positional[0])
 	syncer := sync.Syncer{Client: client}
-	if err := syncer.Sync(context.Background(), remotePath, fs.Arg(1), sync.Options{DryRun: *dryRun}); err != nil {
+	expandedReportPath, err := expandPath(parsed.ReportPath)
+	if err != nil {
+		ui.Errorf("invalid report path: %v", err)
+		os.Exit(2)
+	}
+	if err := syncer.Sync(context.Background(), remotePath, parsed.Positional[1], sync.Options{
+		DryRun:     parsed.DryRun,
+		ReportPath: expandedReportPath,
+	}); err != nil {
 		ui.Errorf("sync failed: %v", err)
 		os.Exit(1)
 	}
@@ -255,4 +263,51 @@ func resolvePath(ctx context.Context, client *api.Client, path string) string {
 		}
 	}
 	return path
+}
+
+func expandPath(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if path == "~" {
+		return os.UserHomeDir()
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
+}
+
+type syncArgs struct {
+	DryRun     bool
+	ReportPath string
+	Positional []string
+}
+
+func parseSyncArgs(args []string) (syncArgs, error) {
+	parsed := syncArgs{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--dry-run":
+			parsed.DryRun = true
+		case arg == "--report":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("missing value for --report")
+			}
+			parsed.ReportPath = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--report="):
+			parsed.ReportPath = strings.TrimPrefix(arg, "--report=")
+		case strings.HasPrefix(arg, "-"):
+			return parsed, fmt.Errorf("unknown flag %s", arg)
+		default:
+			parsed.Positional = append(parsed.Positional, arg)
+		}
+	}
+	return parsed, nil
 }

@@ -19,12 +19,15 @@ type dirMember struct {
 	Type  string `json:"type"`
 	Size  int64  `json:"size"`
 	Mtime int64  `json:"mtime"`
+	Chash string `json:"chash"`
+	Mhash string `json:"mhash"`
+	Nhash string `json:"nhash"`
 }
 
 func (c *Client) ListDir(ctx context.Context, path string) ([]model.Entry, error) {
 	query := url.Values{}
 	query.Set("path", path)
-	query.Set("fields", "members.name,members.path,members.type,members.size,members.mtime")
+	query.Set("fields", "members.name,members.path,members.type,members.size,members.mtime,members.chash,members.mhash,members.nhash")
 
 	req, err := c.newRequest(ctx, http.MethodGet, "/dir", query)
 	if err != nil {
@@ -50,6 +53,9 @@ func (c *Client) ListDir(ctx context.Context, path string) ([]model.Entry, error
 			Type:      entryType,
 			Size:      member.Size,
 			UpdatedAt: time.Unix(member.Mtime, 0),
+			Chash:     member.Chash,
+			Mhash:     member.Mhash,
+			Nhash:     member.Nhash,
 		})
 	}
 

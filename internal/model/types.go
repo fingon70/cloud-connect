@@ -16,4 +16,7 @@ type Entry struct {
 	Type      EntryType
 	Size      int64
 	UpdatedAt time.Time
+	Chash     string
+	Mhash     string
+	Nhash     string
 }

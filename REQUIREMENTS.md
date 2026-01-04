@@ -29,8 +29,31 @@ This document captures the prerequisites and setup needed before developing or u
   - One-way (remote -> local) or bidirectional.
   - Full mirroring or selective paths.
 - Decide conflict handling rules (newer wins, keep both, prompt).
+- Safety goals:
+  - Protect local changes from being overwritten by remote updates.
+  - Support cross-device edits (e.g., Windows HiDrive client) while syncing to Linux.
+  - Keep sensitive files (Cryptomator vaults, KeePass databases) consistent without forced overwrites.
+- Open decisions:
+  - Hash-based verification (remote-change detection vs full integrity check).
+  - Default conflict policy when local and remote both change.
+  - Whether to implement full HiDrive hash algorithm locally or rely on remote hashes for remote->local sync.
 
 ## Verification Checklist
 - Can authenticate via API and obtain an access token.
 - Can list root directory (`/`) and nested paths.
 - Can download a single file to the local target.
+
+## Hash Strategy (MVP)
+HiDrive exposes content and metadata hashes that can be requested via `fields` on `GET /dir` or `GET /meta`.
+Use those remote hashes to detect changes for remote -> local sync without generating local hashes yet.
+
+Recommended fields for listing:
+- `members.path,members.type,members.size,members.mtime,members.chash,members.mhash,members.nhash`
+
+Decision logic:
+- If remote `chash` or `mhash` changed since last sync and local file unchanged, download.
+- If remote changed and local changed too, skip + report (avoid overwriting multi-machine changes).
+- If remote unchanged, skip.
+
+Future considerations:
+- For local -> remote, decide whether to implement local hash generation or upload entire files on change.

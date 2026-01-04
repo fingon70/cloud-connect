@@ -26,6 +26,9 @@ Config file path:
 Token storage:
 - `~/.config/hidrive-cli/token.json`
 
+Sync state:
+- `~/.config/hidrive-cli/state.json`
+
 ## Planned Commands
 Auth:
 - `hidrive auth login` – open browser, complete OAuth, store token.
@@ -37,7 +40,21 @@ Browse:
 
 Sync:
 - `hidrive sync /Photos ~/hidrive-sync` – download-only mirror.
-- Flags: `--dry-run`, `--exclude`, `--include`, `--delete` (optional).
+- Flags: `--dry-run`, `--report`, `--exclude`, `--include`, `--delete` (optional).
+
+## Sync Safety (MVP)
+The HiDrive API exposes hashes for file content and metadata. For the first release we use remote hashes
+(`chash`, `mhash`) returned by `GET /dir` or `GET /meta` to detect remote changes without generating local hashes.
+
+Behavior:
+- Remote changed + local unchanged since last sync: download.
+- Remote changed + local changed: skip + report (avoid overwriting multi-machine edits).
+- Remote unchanged: skip.
+- Local layout mirrors the remote path under the chosen local root (for example `/Photos` becomes `~/hidrive-sync/Photos`).
+- Paths under `/users/<alias>` are treated as the user root, so `/users/<alias>/00_INBOX` becomes `~/hidrive-sync/00_INBOX`.
+
+Reporting:
+- `--report /path/to/report.json` writes a JSON summary with counts and conflict paths.
 
 ## Development
 Go 1.22+ recommended.
