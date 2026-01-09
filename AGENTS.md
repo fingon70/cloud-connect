@@ -4,7 +4,10 @@
 This repository is currently a minimal skeleton. The only tracked file is `LICENSE`, and there is no application source yet. As code is added, keep top-level directories conventional and easy to scan (for example: `src/`, `tests/`, `docs/`, `scripts/`). If you introduce assets, group them under a clear path such as `assets/` or `public/`.
 
 ## Build, Test, and Development Commands
-No build, test, or run commands are defined in the repository at this time. When you add tooling, document the exact commands here (for example: `npm run build`, `make test`) and keep them in sync with any package scripts or Makefile targets.
+Build and test commands:
+- `make build` (builds `bin/hidrive`)
+- `make test` (runs `go test ./...`)
+- `make install-completions` (installs bash/zsh/fish completion scripts)
 
 ## Coding Style & Naming Conventions
 There are no established style or linting rules yet. When introducing code, standardize on:

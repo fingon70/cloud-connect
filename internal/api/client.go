@@ -42,6 +42,20 @@ func DefaultBaseURL() string {
 	return "https://api.hidrive.strato.com/2.1"
 }
 
+func normalizePath(value string) string {
+	if value == "" {
+		return value
+	}
+	if value == "/" {
+		return value
+	}
+	trimmed := strings.TrimRight(value, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	return trimmed
+}
+
 func (c *Client) newRequest(ctx context.Context, method, path string, query url.Values) (*http.Request, error) {
 	base := strings.TrimRight(c.BaseURL, "/")
 	endpoint := fmt.Sprintf("%s%s", base, path)

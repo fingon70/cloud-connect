@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/fingon70/cloud-connect/internal/api"
 	"github.com/fingon70/cloud-connect/internal/auth"
 	"github.com/fingon70/cloud-connect/internal/config"
+	"github.com/fingon70/cloud-connect/internal/model"
 	"github.com/fingon70/cloud-connect/internal/sync"
 	"github.com/fingon70/cloud-connect/internal/ui"
 )
@@ -30,6 +33,12 @@ func main() {
 		handleLs(os.Args[2:])
 	case "sync":
 		handleSync(os.Args[2:])
+	case "download":
+		handleDownload(os.Args[2:])
+	case "completion":
+		handleCompletion(os.Args[2:])
+	case "__complete":
+		handleComplete(os.Args[2:])
 	case "whoami":
 		handleWhoAmI(os.Args[2:])
 	case "help", "-h", "--help":
@@ -47,6 +56,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  hidrive auth status")
 	fmt.Fprintln(os.Stderr, "  hidrive ls <remote-path> [--long] [--json] [--recursive]")
 	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--delete] [--report <path>]")
+	fmt.Fprintln(os.Stderr, "  hidrive download <remote-file> <local-path>")
+	fmt.Fprintln(os.Stderr, "  hidrive completion <bash|zsh|fish>")
 	fmt.Fprintln(os.Stderr, "  hidrive whoami")
 }
 
@@ -187,6 +198,79 @@ func handleSync(args []string) {
 	}
 }
 
+func handleDownload(args []string) {
+	fs := flag.NewFlagSet("download", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "download requires <remote-file> and <local-path>")
+		os.Exit(2)
+	}
+
+	token := loadValidToken()
+	client := api.NewClient(api.DefaultBaseURL(), token.AccessToken)
+	remotePath := resolvePath(context.Background(), client, fs.Arg(0))
+	entry, err := client.GetMeta(context.Background(), remotePath)
+	if err != nil {
+		ui.Errorf("download failed: %v", err)
+		os.Exit(1)
+	}
+	if entry.Path == "" {
+		entry.Path = remotePath
+	}
+	if entry.Type == model.EntryFolder {
+		ui.Errorf("download failed: %s is a directory", entry.Path)
+		os.Exit(2)
+	}
+
+	dest, err := resolveDownloadDest(remotePath, fs.Arg(1))
+	if err != nil {
+		ui.Errorf("invalid destination: %v", err)
+		os.Exit(2)
+	}
+
+	if err := downloadFile(context.Background(), client, entry, dest); err != nil {
+		ui.Errorf("download failed: %v", err)
+		os.Exit(1)
+	}
+	ui.Infof("downloaded %s", dest)
+}
+
+func handleCompletion(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "completion requires a shell: bash, zsh, or fish")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "bash":
+		fmt.Print(bashCompletion)
+	case "zsh":
+		fmt.Print(zshCompletion)
+	case "fish":
+		fmt.Print(fishCompletion)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown shell: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func handleComplete(args []string) {
+	if len(args) < 1 {
+		return
+	}
+	token := loadValidToken()
+	client := api.NewClient(api.DefaultBaseURL(), token.AccessToken)
+	paths, err := remoteCompletions(context.Background(), client, args[0])
+	if err != nil {
+		return
+	}
+	for _, item := range paths {
+		fmt.Fprintln(os.Stdout, item)
+	}
+}
+
 func handleWhoAmI(args []string) {
 	if len(args) != 0 {
 		fmt.Fprintln(os.Stderr, "whoami does not take arguments")
@@ -283,6 +367,92 @@ func expandPath(path string) (string, error) {
 	return path, nil
 }
 
+func resolveDownloadDest(remotePath, destArg string) (string, error) {
+	if destArg == "" {
+		return "", errors.New("destination path is required")
+	}
+	dest, err := expandPath(destArg)
+	if err != nil {
+		return "", err
+	}
+	base := path.Base(remotePath)
+	if info, err := os.Stat(dest); err == nil && info.IsDir() {
+		return filepath.Join(dest, base), nil
+	}
+	if strings.HasSuffix(destArg, string(os.PathSeparator)) {
+		return filepath.Join(dest, base), nil
+	}
+	return dest, nil
+}
+
+func downloadFile(ctx context.Context, client *api.Client, entry model.Entry, dest string) error {
+	if entry.Path == "" {
+		return errors.New("missing remote file path")
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tempFile := dest + ".part"
+	out, err := os.Create(tempFile)
+	if err != nil {
+		return err
+	}
+	if err := client.DownloadFile(ctx, entry.Path, out); err != nil {
+		out.Close()
+		_ = os.Remove(tempFile)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tempFile)
+		return err
+	}
+	if err := os.Rename(tempFile, dest); err != nil {
+		_ = os.Remove(tempFile)
+		return err
+	}
+	if !entry.UpdatedAt.IsZero() {
+		_ = os.Chtimes(dest, time.Now(), entry.UpdatedAt)
+	}
+	return nil
+}
+
+func remoteCompletions(ctx context.Context, client *api.Client, prefix string) ([]string, error) {
+	if prefix == "" {
+		prefix = "/"
+	}
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	dir := prefix
+	base := ""
+	if !strings.HasSuffix(prefix, "/") {
+		dir = path.Dir(prefix)
+		if dir == "." {
+			dir = "/"
+		}
+		base = path.Base(prefix)
+	}
+	entries, err := client.ListDir(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		candidate := entry.Path
+		if candidate == "" {
+			candidate = path.Join(dir, entry.Name)
+		}
+		if base != "" && !strings.HasPrefix(path.Base(candidate), base) {
+			continue
+		}
+		if entry.Type == model.EntryFolder {
+			candidate += "/"
+		}
+		paths = append(paths, candidate)
+	}
+	return paths, nil
+}
+
 type syncArgs struct {
 	DryRun     bool
 	Delete     bool
@@ -315,3 +485,138 @@ func parseSyncArgs(args []string) (syncArgs, error) {
 	}
 	return parsed, nil
 }
+
+const bashCompletion = `# bash completion for hidrive
+_hidrive_complete() {
+  local cur cmd prev
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  cmd="${COMP_WORDS[1]}"
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "auth ls sync download whoami completion" -- "$cur") )
+    return 0
+  fi
+
+  case "$cmd" in
+    auth)
+      COMPREPLY=( $(compgen -W "login status" -- "$cur") )
+      ;;
+    completion)
+      COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+      ;;
+    ls)
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--long --json --recursive" -- "$cur") )
+      else
+        if [[ -z "$cur" && -n "$prev" ]]; then
+          cur="$prev"
+        fi
+        COMPREPLY=( $(hidrive __complete "$cur" 2>/dev/null) )
+      fi
+      ;;
+    sync)
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--dry-run --delete --report" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(hidrive __complete "$cur" 2>/dev/null) )
+      else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      fi
+      ;;
+    download)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(hidrive __complete "$cur" 2>/dev/null) )
+      else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      fi
+      ;;
+  esac
+}
+complete -F _hidrive_complete hidrive
+`
+
+const zshCompletion = `#compdef hidrive
+
+_hidrive_remote() {
+  local cur="$1"
+  if [[ -z $cur ]]; then
+    cur="$words[CURRENT]"
+  fi
+  if [[ -z $cur && CURRENT -gt 2 ]]; then
+    cur="$words[CURRENT-1]"
+  fi
+  local -a candidates
+  candidates=("${(@f)$(hidrive __complete "$cur" 2>/dev/null)}")
+  if (( ${#candidates[@]} )); then
+    compadd -Q -a candidates
+  else
+    _message 'no remote matches'
+  fi
+}
+
+_hidrive() {
+  if (( CURRENT == 2 )); then
+    _values 'command' auth ls sync download whoami completion
+    return
+  fi
+
+  local cmd=$words[2]
+  case $cmd in
+    auth)
+      _values 'auth' login status
+      ;;
+    completion)
+      _values 'shell' bash zsh fish
+      ;;
+    ls)
+      if [[ $words[CURRENT] == -* ]]; then
+        _values 'flag' --long --json --recursive
+      else
+        _hidrive_remote "$words[CURRENT]"
+      fi
+      ;;
+    sync)
+      if [[ $words[CURRENT] == -* ]]; then
+        _values 'flag' --dry-run --delete --report
+      elif (( CURRENT == 3 )); then
+        _hidrive_remote "$words[CURRENT]"
+      else
+        _files
+      fi
+      ;;
+    download)
+      if (( CURRENT == 3 )); then
+        _hidrive_remote "$words[CURRENT]"
+      else
+        _files
+      fi
+      ;;
+  esac
+}
+
+compdef _hidrive hidrive
+`
+
+const fishCompletion = `function __hidrive_remote_paths
+  set -l cur (commandline -ct)
+  if test -z "$cur"
+    set -l tokens (commandline -opc)
+    if test (count $tokens) -ge 2
+      set cur $tokens[-1]
+    end
+  end
+  hidrive __complete "$cur" 2>/dev/null
+end
+
+complete -c hidrive -n 'not __fish_seen_subcommand_from auth ls sync download whoami completion' -a 'auth ls sync download whoami completion'
+complete -c hidrive -n '__fish_seen_subcommand_from auth' -a 'login status'
+complete -c hidrive -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
+
+complete -c hidrive -n '__fish_seen_subcommand_from ls; and string match -q -- "--*" (commandline -ct)' -l long -l json -l recursive
+complete -c hidrive -n '__fish_seen_subcommand_from sync; and string match -q -- "--*" (commandline -ct)' -l dry-run -l delete -l report
+
+complete -c hidrive -n '__fish_seen_subcommand_from ls' -a '(__hidrive_remote_paths)'
+complete -c hidrive -n '__fish_seen_subcommand_from sync; and test (count (commandline -opc)) -eq 2' -a '(__hidrive_remote_paths)'
+complete -c hidrive -n '__fish_seen_subcommand_from download; and test (count (commandline -opc)) -eq 2' -a '(__hidrive_remote_paths)'
+`

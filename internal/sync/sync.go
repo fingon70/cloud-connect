@@ -58,12 +58,43 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 		return err
 	}
 
-	localBase, err := s.localBase(ctx, remotePath, localRoot, opts)
+	state, err := LoadState()
 	if err != nil {
 		return err
 	}
 
-	state, err := LoadState()
+	target, err := s.Client.GetMeta(ctx, remotePath)
+	if err != nil {
+		return err
+	}
+	if target.Path == "" {
+		target.Path = remotePath
+	}
+	if target.Type == model.EntryFile {
+		if opts.Delete {
+			return errors.New("delete is not supported when syncing a file path")
+		}
+		localPath := filepath.Join(localRoot, path.Base(target.Path))
+		report := syncReport{}
+		outcome, err := s.syncFile(ctx, target, localPath, opts, state)
+		if err != nil {
+			report.Errors++
+			report.ErrorPaths = append(report.ErrorPaths, target.Path+": "+err.Error())
+		} else {
+			switch outcome {
+			case outcomeDownloaded:
+				report.Downloaded++
+			case outcomeConflict:
+				report.Conflicts++
+				report.ConflictPaths = append(report.ConflictPaths, target.Path)
+			case outcomeSkipped:
+				report.Skipped++
+			}
+		}
+		return finalizeSync(state, report, opts)
+	}
+
+	localBase, err := s.localBase(ctx, remotePath, localRoot, opts)
 	if err != nil {
 		return err
 	}
@@ -130,18 +161,7 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 		return err
 	}
 
-	if opts.ReportPath != "" {
-		if err := writeReport(opts.ReportPath, report); err != nil {
-			return err
-		}
-	}
-
-	ui.Infof("sync summary: downloaded=%d skipped=%d conflicts=%d deleted=%d errors=%d",
-		report.Downloaded, report.Skipped, report.Conflicts, report.Deleted, report.Errors)
-	if report.Errors > 0 {
-		return errors.New("sync completed with errors")
-	}
-	return nil
+	return finalizeSync(state, report, opts)
 }
 
 func (s *Syncer) localBase(ctx context.Context, remotePath, localRoot string, opts Options) (string, error) {
@@ -467,6 +487,23 @@ func writeReport(path string, report syncReport) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o600)
+}
+
+func finalizeSync(state *SyncState, report syncReport, opts Options) error {
+	if err := SaveState(state); err != nil {
+		return err
+	}
+	if opts.ReportPath != "" {
+		if err := writeReport(opts.ReportPath, report); err != nil {
+			return err
+		}
+	}
+	ui.Infof("sync summary: downloaded=%d skipped=%d conflicts=%d deleted=%d errors=%d",
+		report.Downloaded, report.Skipped, report.Conflicts, report.Deleted, report.Errors)
+	if report.Errors > 0 {
+		return errors.New("sync completed with errors")
+	}
+	return nil
 }
 
 type entryFileInfo struct {

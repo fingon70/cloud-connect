@@ -9,7 +9,7 @@ import (
 
 func (c *Client) DownloadFile(ctx context.Context, path string, out io.Writer) error {
 	query := url.Values{}
-	query.Set("path", path)
+	query.Set("path", normalizePath(path))
 
 	req, err := c.newRequest(ctx, http.MethodGet, "/file", query)
 	if err != nil {

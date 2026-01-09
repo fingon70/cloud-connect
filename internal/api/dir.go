@@ -26,7 +26,7 @@ type dirMember struct {
 
 func (c *Client) ListDir(ctx context.Context, path string) ([]model.Entry, error) {
 	query := url.Values{}
-	query.Set("path", path)
+	query.Set("path", normalizePath(path))
 	query.Set("fields", "members.name,members.path,members.type,members.size,members.mtime,members.chash,members.mhash,members.nhash")
 
 	req, err := c.newRequest(ctx, http.MethodGet, "/dir", query)
