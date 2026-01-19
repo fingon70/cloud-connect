@@ -35,3 +35,14 @@ func TestParseSyncArgsReportEquals(t *testing.T) {
 		t.Fatalf("expected 2 positional args, got %d", len(parsed.Positional))
 	}
 }
+
+func TestParseSyncArgsUploadFlag(t *testing.T) {
+	args := []string{"--upload", "/local", "/remote"}
+	parsed, err := parseSyncArgs(args)
+	if err != nil {
+		t.Fatalf("parseSyncArgs error: %v", err)
+	}
+	if !parsed.Upload {
+		t.Fatalf("expected Upload true")
+	}
+}

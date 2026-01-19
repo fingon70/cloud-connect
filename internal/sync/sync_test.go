@@ -127,6 +127,25 @@ func TestWriteReport(t *testing.T) {
 	}
 }
 
+func TestInferLocalRootRelativeFromNamedRoot(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "hidrive-sync")
+	nested := filepath.Join(root, "Foo", "NewDir", "bar.txt")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(nested, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	rel, ok := inferLocalRootRelative(nested)
+	if !ok {
+		t.Fatalf("expected root relative path")
+	}
+	if rel != "Foo/NewDir/bar.txt" {
+		t.Fatalf("unexpected relative path: %s", rel)
+	}
+}
+
 func contextBackground() context.Context {
 	return context.Background()
 }

@@ -56,6 +56,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  hidrive auth status")
 	fmt.Fprintln(os.Stderr, "  hidrive ls <remote-path> [--long] [--json] [--recursive]")
 	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--delete] [--report <path>]")
+	fmt.Fprintln(os.Stderr, "  hidrive sync <local-path> <remote-path> [--upload] [--dry-run] [--report <path>]")
 	fmt.Fprintln(os.Stderr, "  hidrive download <remote-file> <local-path>")
 	fmt.Fprintln(os.Stderr, "  hidrive completion <bash|zsh|fish>")
 	fmt.Fprintln(os.Stderr, "  hidrive whoami")
@@ -181,14 +182,50 @@ func handleSync(args []string) {
 
 	token := loadValidToken()
 	client := api.NewClient(api.DefaultBaseURL(), token.AccessToken)
-	remotePath := resolvePath(context.Background(), client, parsed.Positional[0])
+	direction := syncDownload
+	if parsed.Upload {
+		direction = syncUpload
+	} else {
+		detected, ok := detectSyncDirection(parsed.Positional[0], parsed.Positional[1])
+		if !ok {
+			ui.Errorf("unable to determine sync direction; use --upload to force local-to-remote sync")
+			os.Exit(2)
+		}
+		direction = detected
+	}
+
+	var remotePath string
+	var localPath string
+	if direction == syncUpload {
+		localPath = parsed.Positional[0]
+		remotePath = resolvePath(context.Background(), client, parsed.Positional[1])
+	} else {
+		remotePath = resolvePath(context.Background(), client, parsed.Positional[0])
+		localPath = parsed.Positional[1]
+	}
+	expandedLocalPath, err := expandPath(localPath)
+	if err != nil {
+		ui.Errorf("invalid local path: %v", err)
+		os.Exit(2)
+	}
 	syncer := sync.Syncer{Client: client}
 	expandedReportPath, err := expandPath(parsed.ReportPath)
 	if err != nil {
 		ui.Errorf("invalid report path: %v", err)
 		os.Exit(2)
 	}
-	if err := syncer.Sync(context.Background(), remotePath, parsed.Positional[1], sync.Options{
+	if direction == syncUpload {
+		if err := syncer.Upload(context.Background(), expandedLocalPath, remotePath, sync.Options{
+			DryRun:     parsed.DryRun,
+			Delete:     parsed.Delete,
+			ReportPath: expandedReportPath,
+		}); err != nil {
+			ui.Errorf("sync failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := syncer.Sync(context.Background(), remotePath, expandedLocalPath, sync.Options{
 		DryRun:     parsed.DryRun,
 		Delete:     parsed.Delete,
 		ReportPath: expandedReportPath,
@@ -456,6 +493,7 @@ func remoteCompletions(ctx context.Context, client *api.Client, prefix string) (
 type syncArgs struct {
 	DryRun     bool
 	Delete     bool
+	Upload     bool
 	ReportPath string
 	Positional []string
 }
@@ -469,6 +507,8 @@ func parseSyncArgs(args []string) (syncArgs, error) {
 			parsed.DryRun = true
 		case arg == "--delete":
 			parsed.Delete = true
+		case arg == "--upload":
+			parsed.Upload = true
 		case arg == "--report":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("missing value for --report")
@@ -484,6 +524,60 @@ func parseSyncArgs(args []string) (syncArgs, error) {
 		}
 	}
 	return parsed, nil
+}
+
+type syncDirection int
+
+const (
+	syncDownload syncDirection = iota
+	syncUpload
+)
+
+func detectSyncDirection(first, second string) (syncDirection, bool) {
+	firstExists := localPathExists(first)
+	secondExists := localPathExists(second)
+	if firstExists && !secondExists {
+		return syncUpload, true
+	}
+	if secondExists && !firstExists {
+		return syncDownload, true
+	}
+	if firstExists && secondExists {
+		return syncDownload, false
+	}
+	firstLocalHint := isLocalHint(first)
+	secondLocalHint := isLocalHint(second)
+	if firstLocalHint && !secondLocalHint {
+		return syncUpload, true
+	}
+	if secondLocalHint && !firstLocalHint {
+		return syncDownload, true
+	}
+	firstRemoteHint := strings.HasPrefix(first, "/")
+	secondRemoteHint := strings.HasPrefix(second, "/")
+	if firstRemoteHint && !secondRemoteHint {
+		return syncDownload, true
+	}
+	if secondRemoteHint && !firstRemoteHint {
+		return syncUpload, true
+	}
+	return syncDownload, false
+}
+
+func isLocalHint(path string) bool {
+	return strings.HasPrefix(path, "~") || strings.HasPrefix(path, ".")
+}
+
+func localPathExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	expanded, err := expandPath(path)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(expanded)
+	return err == nil
 }
 
 const bashCompletion = `# bash completion for hidrive
@@ -517,7 +611,7 @@ _hidrive_complete() {
       ;;
     sync)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--dry-run --delete --report" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--dry-run --delete --report --upload" -- "$cur") )
       elif [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(hidrive __complete "$cur" 2>/dev/null) )
       else
@@ -578,7 +672,7 @@ _hidrive() {
       ;;
     sync)
       if [[ $words[CURRENT] == -* ]]; then
-        _values 'flag' --dry-run --delete --report
+        _values 'flag' --dry-run --delete --report --upload
       elif (( CURRENT == 3 )); then
         _hidrive_remote "$words[CURRENT]"
       else
@@ -614,7 +708,7 @@ complete -c hidrive -n '__fish_seen_subcommand_from auth' -a 'login status'
 complete -c hidrive -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 
 complete -c hidrive -n '__fish_seen_subcommand_from ls; and string match -q -- "--*" (commandline -ct)' -l long -l json -l recursive
-complete -c hidrive -n '__fish_seen_subcommand_from sync; and string match -q -- "--*" (commandline -ct)' -l dry-run -l delete -l report
+complete -c hidrive -n '__fish_seen_subcommand_from sync; and string match -q -- "--*" (commandline -ct)' -l dry-run -l delete -l report -l upload
 
 complete -c hidrive -n '__fish_seen_subcommand_from ls' -a '(__hidrive_remote_paths)'
 complete -c hidrive -n '__fish_seen_subcommand_from sync; and test (count (commandline -opc)) -eq 2' -a '(__hidrive_remote_paths)'

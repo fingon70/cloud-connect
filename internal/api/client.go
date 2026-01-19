@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,6 +72,21 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 	return req, nil
 }
 
+func (c *Client) newRequestWithBody(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Request, error) {
+	base := strings.TrimRight(c.BaseURL, "/")
+	endpoint := fmt.Sprintf("%s%s", base, path)
+	if len(query) > 0 {
+		endpoint = endpoint + "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
+
 func (c *Client) do(req *http.Request, out any) error {
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -87,6 +103,22 @@ func (c *Client) do(req *http.Request, out any) error {
 	}
 
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusNotFound
+}
+
+func IsConflict(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusConflict
 }
 
 func (c *Client) doStream(req *http.Request, out io.Writer) error {

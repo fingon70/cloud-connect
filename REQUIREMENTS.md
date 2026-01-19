@@ -25,6 +25,13 @@ This document captures the prerequisites and setup needed before developing or u
   - Creating/deleting remote items if sync is bidirectional.
 - Record any rate limits or size limits from the API docs.
 
+## Upload API Notes
+- Remote folder creation: `POST /dir?path=...`
+- File upload: `POST /file?dir=<dir>&name=<filename>` (create, no overwrite)
+- File overwrite: `PUT /file?dir=<dir>&name=<filename>` (create or replace)
+- Upload body is raw file bytes; use `Content-Type: application/octet-stream` (or a specific MIME type).
+- Upload size limit: 2 GB per request body (see HiDrive API docs).
+
 ## Sync Behavior
 - Define whether sync is:
   - One-way (remote -> local) or bidirectional.
@@ -44,6 +51,8 @@ This document captures the prerequisites and setup needed before developing or u
 - Can list root directory (`/`) and nested paths.
 - Can download a single file to the local target.
 - Can sync a remote folder to a local root with hash-based change detection.
+- Can upload a local file to a remote path.
+- Can auto-create missing remote directories during upload.
 - Can generate a report JSON and optionally delete local files missing on remote.
 
 ## Hash Strategy (MVP)

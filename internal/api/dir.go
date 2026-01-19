@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/fingon70/cloud-connect/internal/model"
@@ -60,6 +62,52 @@ func (c *Client) ListDir(ctx context.Context, path string) ([]model.Entry, error
 	}
 
 	return entries, nil
+}
+
+func (c *Client) CreateDir(ctx context.Context, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path is required")
+	}
+	query := url.Values{}
+	query.Set("path", normalizePath(path))
+	req, err := c.newRequest(ctx, http.MethodPost, "/dir", query)
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
+func (c *Client) EnsureDir(ctx context.Context, dir string) error {
+	dir = normalizePath(strings.TrimSpace(dir))
+	if dir == "" || dir == "/" {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(dir, "/"), "/")
+	current := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		current = current + "/" + part
+		entry, err := c.GetMeta(ctx, current)
+		if err == nil {
+			if entry.Type != model.EntryFolder {
+				return fmt.Errorf("remote path is not a directory: %s", current)
+			}
+			continue
+		}
+		if IsNotFound(err) {
+			if err := c.CreateDir(ctx, current); err != nil {
+				if IsConflict(err) {
+					continue
+				}
+				return err
+			}
+			continue
+		}
+		return err
+	}
+	return nil
 }
 
 func decodePath(value string) string {

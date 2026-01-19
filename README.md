@@ -3,14 +3,14 @@
 Command-line tool to browse and sync Strato HiDrive files to a local folder.
 
 ## Status
-Planned: initial MVP with OAuth login, `ls`, and download-only `sync`.
+MVP: OAuth login, `ls`, download, and bidirectional sync (download + upload).
 
 ## Architecture Overview
 - `cmd/hidrive`: CLI entrypoint.
 - `internal/auth`: OAuth 2.0 flow and token persistence.
 - `internal/config`: config file and env overrides.
 - `internal/api`: HiDrive REST client and pagination.
-- `internal/sync`: download-only mirroring logic.
+- `internal/sync`: download + upload mirroring logic.
 - `internal/model`: shared types and errors.
 
 ## Configuration
@@ -29,7 +29,7 @@ Token storage:
 Sync state:
 - `~/.config/hidrive-cli/state.json`
 
-## Planned Commands
+## Commands
 Auth:
 - `hidrive auth login` – open browser, complete OAuth, store token.
 - `hidrive auth status` – show login state and token expiry.
@@ -42,8 +42,9 @@ Download:
 - `hidrive download /Photos/shot.jpg ~/Downloads/shot.jpg` – download a single file.
 
 Sync:
-- `hidrive sync /Photos ~/hidrive-sync` – download-only mirror.
-- Flags: `--dry-run`, `--delete`, `--report`, `--exclude`, `--include` (optional).
+- Download: `hidrive sync /Photos ~/hidrive-sync`
+- Upload: `hidrive sync ~/hidrive-sync/Photos /users/<alias>/Photos`
+- Flags: `--dry-run`, `--delete`, `--report`, `--upload`
 
 ## Sync Safety (MVP)
 The HiDrive API exposes hashes for file content and metadata. For the first release we use remote hashes
@@ -53,6 +54,8 @@ Behavior:
 - Remote changed + local unchanged since last sync: download.
 - Remote changed + local changed: skip + report (avoid overwriting multi-machine edits).
 - Remote unchanged: skip.
+- Local changed + remote unchanged: upload.
+- Local changed + remote changed: skip + report (avoid overwriting remote changes).
 - Local layout mirrors the remote path under the chosen local root (for example `/Photos` becomes `~/hidrive-sync/Photos`).
 - Paths under `/users/<alias>` are treated as the user root, so `/users/<alias>/00_INBOX` becomes `~/hidrive-sync/00_INBOX`.
 - `--delete` removes local files and directories not present in the remote listing.
@@ -65,15 +68,17 @@ Reporting:
 ## Development
 Go 1.22+ recommended.
 
-Common workflows (once commands exist):
-- `go test ./...`
-- `go run ./cmd/hidrive ls /`
+Build from repo:
+- `make build` (writes `bin/hidrive`)
+- `make test` (runs `go test ./...`)
+- `go run ./cmd/hidrive ls /` (run without building)
 
 ## Usage Examples
 - Authenticate: `hidrive auth login`
 - List a folder: `hidrive ls /users/<alias>/Documents`
 - Sync a remote folder to a local directory: `hidrive sync /users/<alias> ~/HiDrive`
 - Download a single file: `hidrive download /users/<alias>/Documents/report.pdf ~/HiDrive/report.pdf`
+- Upload a local folder to remote: `hidrive sync ~/HiDrive/Projects /users/<alias>/Projects`
 
 ## Shell Completion
 Generate completion scripts:
@@ -112,3 +117,10 @@ Makefile:
 - `--report` writes a JSON summary including conflicts and errors.
 - `--delete` removes local entries missing on the remote path.
 - Syncing a single file path downloads it to the local root using the remote file name.
+
+## Current State (Local -> Remote)
+- Upload sync detects local changes based on size/mtime and avoids overwriting remote changes.
+- Missing remote folders are created automatically before uploads.
+- Use `hidrive sync <local-path> <remote-path>` or force with `--upload` if the direction is ambiguous.
+- If the local path is inside a folder named `hidrive-sync`, the relative path under that folder is mirrored remotely.
+- Optional marker: place `.hidrive-sync-root` in a local root folder to force the same mirroring behavior.

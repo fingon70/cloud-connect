@@ -21,6 +21,14 @@ No test framework is configured yet. When tests are added:
 - Keep unit tests near source or in a dedicated `tests/` directory.
 - Document how to run the suite and any coverage thresholds.
 
+## Sync Behavior Notes
+- Sync supports download (remote -> local) and upload (local -> remote).
+- `hidrive sync` auto-detects direction based on path existence and hints; use `--upload` to force local -> remote when ambiguous.
+- Uploads use HiDrive `POST /file` for new files and `PUT /file` for overwrites; remote folders are created with `POST /dir`.
+- Missing remote directories are created automatically when uploading.
+- Local root mirroring: if a local path is inside `hidrive-sync`, or a `.hidrive-sync-root` marker exists in an ancestor, the relative path under that root is mirrored remotely.
+- Sync state is stored at `~/.config/hidrive-cli/state.json` and is used to detect conflicts in both directions.
+
 ## Commit & Pull Request Guidelines
 Git history only includes a single "Initial commit", so no commit convention is established. Adopt a simple, consistent pattern (for example: `feat: add api client` or `fix: handle empty config`) and keep commits scoped.
 

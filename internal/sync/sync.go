@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"mime"
 	"os"
 	"path"
 	"path/filepath"
@@ -30,12 +32,14 @@ type syncOutcome string
 
 const (
 	outcomeDownloaded syncOutcome = "downloaded"
+	outcomeUploaded   syncOutcome = "uploaded"
 	outcomeSkipped    syncOutcome = "skipped"
 	outcomeConflict   syncOutcome = "conflict"
 )
 
 type syncReport struct {
 	Downloaded    int      `json:"downloaded"`
+	Uploaded      int      `json:"uploaded"`
 	Skipped       int      `json:"skipped"`
 	Conflicts     int      `json:"conflicts"`
 	Deleted       int      `json:"deleted"`
@@ -159,6 +163,139 @@ func (s *Syncer) Sync(ctx context.Context, remotePath, localRoot string, opts Op
 
 	if err := SaveState(state); err != nil {
 		return err
+	}
+
+	return finalizeSync(state, report, opts)
+}
+
+func (s *Syncer) Upload(ctx context.Context, localPath, remotePath string, opts Options) error {
+	if s.Client == nil {
+		return errors.New("missing api client")
+	}
+	if opts.Delete {
+		return errors.New("delete is not supported when uploading")
+	}
+
+	localPath = strings.TrimSpace(localPath)
+	if localPath == "" {
+		return errors.New("local path is required")
+	}
+	remotePath = strings.TrimSpace(remotePath)
+	if remotePath == "" {
+		return errors.New("remote path is required")
+	}
+
+	state, err := LoadState()
+	if err != nil {
+		return err
+	}
+	if state.Files == nil {
+		state.Files = map[string]FileState{}
+	}
+
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return err
+	}
+
+	if rel, ok := inferLocalRootRelative(localPath); ok {
+		remotePath = path.Join(remotePath, rel)
+	}
+
+	ensured := map[string]struct{}{}
+	report := syncReport{}
+
+	if !info.IsDir() {
+		outcome, err := s.uploadSingleFile(ctx, localPath, info, remotePath, opts, state, ensured)
+		if err != nil {
+			report.Errors++
+			report.ErrorPaths = append(report.ErrorPaths, remotePath+": "+err.Error())
+		} else {
+			switch outcome {
+			case outcomeUploaded:
+				report.Uploaded++
+			case outcomeConflict:
+				report.Conflicts++
+				report.ConflictPaths = append(report.ConflictPaths, remotePath)
+			case outcomeSkipped:
+				report.Skipped++
+			}
+		}
+		return finalizeSync(state, report, opts)
+	}
+
+	remoteMeta, err := s.Client.GetMeta(ctx, remotePath)
+	if err != nil && !api.IsNotFound(err) {
+		return err
+	}
+	if err == nil && remoteMeta.Type == model.EntryFile {
+		return fmt.Errorf("remote path is a file: %s", remotePath)
+	}
+	if err := s.ensureRemoteDir(ctx, remotePath, opts, ensured); err != nil {
+		return err
+	}
+
+	remoteEntries, err := s.remoteEntryMap(ctx, remotePath)
+	if err != nil {
+		return err
+	}
+
+	walkErr := filepath.WalkDir(localPath, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == localPath {
+			return nil
+		}
+		rel, err := filepath.Rel(localPath, current)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		remoteTarget := path.Join(remotePath, rel)
+		if entry.IsDir() {
+			if err := s.ensureRemoteDir(ctx, remoteTarget, opts, ensured); err != nil {
+				report.Errors++
+				report.ErrorPaths = append(report.ErrorPaths, remoteTarget+": "+err.Error())
+			}
+			return nil
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			report.Errors++
+			report.ErrorPaths = append(report.ErrorPaths, current+": "+err.Error())
+			return nil
+		}
+		if err := s.ensureRemoteDir(ctx, path.Dir(remoteTarget), opts, ensured); err != nil {
+			report.Errors++
+			report.ErrorPaths = append(report.ErrorPaths, remoteTarget+": "+err.Error())
+			return nil
+		}
+		var remoteEntry *model.Entry
+		if candidate, ok := remoteEntries[remoteTarget]; ok {
+			copy := candidate
+			remoteEntry = &copy
+		}
+		outcome, err := s.syncUploadFile(ctx, current, remoteTarget, info, remoteEntry, opts, state)
+		if err != nil {
+			report.Errors++
+			report.ErrorPaths = append(report.ErrorPaths, remoteTarget+": "+err.Error())
+			return nil
+		}
+		switch outcome {
+		case outcomeUploaded:
+			report.Uploaded++
+		case outcomeConflict:
+			report.Conflicts++
+			report.ConflictPaths = append(report.ConflictPaths, remoteTarget)
+		case outcomeSkipped:
+			report.Skipped++
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr
 	}
 
 	return finalizeSync(state, report, opts)
@@ -321,6 +458,232 @@ func (s *Syncer) downloadAndTrack(ctx context.Context, entry model.Entry, dest s
 	updateState(state, entry, info)
 	ui.Infof("downloaded %s", dest)
 	return outcomeDownloaded, nil
+}
+
+func (s *Syncer) uploadSingleFile(ctx context.Context, localPath string, info os.FileInfo, remotePath string, opts Options, state *SyncState, ensured map[string]struct{}) (syncOutcome, error) {
+	remoteFilePath, remoteEntry, err := s.resolveRemoteFilePath(ctx, remotePath, info.Name())
+	if err != nil {
+		return outcomeSkipped, err
+	}
+	if err := s.ensureRemoteDir(ctx, path.Dir(remoteFilePath), opts, ensured); err != nil {
+		return outcomeSkipped, err
+	}
+	return s.syncUploadFile(ctx, localPath, remoteFilePath, info, remoteEntry, opts, state)
+}
+
+func (s *Syncer) resolveRemoteFilePath(ctx context.Context, remotePath, localName string) (string, *model.Entry, error) {
+	if strings.HasSuffix(remotePath, "/") || remotePath == "/" {
+		remoteFilePath := path.Join(remotePath, localName)
+		entry, err := s.Client.GetMeta(ctx, remoteFilePath)
+		if err != nil && !api.IsNotFound(err) {
+			return "", nil, err
+		}
+		if err != nil {
+			return remoteFilePath, nil, nil
+		}
+		return remoteFilePath, &entry, nil
+	}
+	entry, err := s.Client.GetMeta(ctx, remotePath)
+	if err == nil {
+		if entry.Type == model.EntryFolder {
+			remoteFilePath := path.Join(remotePath, localName)
+			target, err := s.Client.GetMeta(ctx, remoteFilePath)
+			if err != nil && !api.IsNotFound(err) {
+				return "", nil, err
+			}
+			if err != nil {
+				return remoteFilePath, nil, nil
+			}
+			return remoteFilePath, &target, nil
+		}
+		return remotePath, &entry, nil
+	}
+	if api.IsNotFound(err) {
+		return remotePath, nil, nil
+	}
+	return "", nil, err
+}
+
+func (s *Syncer) syncUploadFile(ctx context.Context, localPath, remotePath string, info os.FileInfo, remoteEntry *model.Entry, opts Options, state *SyncState) (syncOutcome, error) {
+	if state == nil {
+		return outcomeSkipped, errors.New("missing sync state")
+	}
+	if state.Files == nil {
+		state.Files = map[string]FileState{}
+	}
+	last, hasState := state.Files[remotePath]
+
+	if remoteEntry == nil {
+		return s.uploadAndTrack(ctx, localPath, remotePath, info, false, opts, state)
+	}
+
+	if !hasState {
+		if localMatchesRemote(*remoteEntry, info) {
+			updateState(state, *remoteEntry, info)
+			return outcomeSkipped, nil
+		}
+		ui.Errorf("conflict %s: remote file exists with no prior sync state", remotePath)
+		return outcomeConflict, nil
+	}
+
+	remoteChanged := remoteEntryChanged(*remoteEntry, last)
+	localChanged := localEntryChanged(info, last)
+
+	if localChanged && remoteChanged {
+		ui.Errorf("conflict %s: local and remote changed since last sync", remotePath)
+		return outcomeConflict, nil
+	}
+	if remoteChanged && !localChanged {
+		ui.Errorf("conflict %s: remote changed since last sync", remotePath)
+		return outcomeConflict, nil
+	}
+	if localChanged {
+		return s.uploadAndTrack(ctx, localPath, remotePath, info, true, opts, state)
+	}
+
+	updateState(state, *remoteEntry, info)
+	return outcomeSkipped, nil
+}
+
+func (s *Syncer) uploadAndTrack(ctx context.Context, localPath, remotePath string, info os.FileInfo, overwrite bool, opts Options, state *SyncState) (syncOutcome, error) {
+	if opts.DryRun {
+		ui.Infof("upload %s -> %s", localPath, remotePath)
+		entry := model.Entry{
+			Path:      remotePath,
+			Size:      info.Size(),
+			UpdatedAt: info.ModTime(),
+		}
+		updateState(state, entry, info)
+		return outcomeUploaded, nil
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return outcomeSkipped, err
+	}
+	defer file.Close()
+
+	contentType := contentTypeForFile(localPath)
+	dir := path.Dir(remotePath)
+	name := path.Base(remotePath)
+	if err := s.Client.UploadFile(ctx, dir, name, file, contentType, overwrite, info.ModTime()); err != nil {
+		return outcomeSkipped, err
+	}
+	entry, err := s.Client.GetMeta(ctx, remotePath)
+	if err != nil {
+		return outcomeSkipped, err
+	}
+	updateState(state, entry, info)
+	ui.Infof("uploaded %s", remotePath)
+	return outcomeUploaded, nil
+}
+
+func (s *Syncer) ensureRemoteDir(ctx context.Context, remotePath string, opts Options, ensured map[string]struct{}) error {
+	remotePath = strings.TrimSpace(remotePath)
+	if remotePath == "" || remotePath == "/" {
+		return nil
+	}
+	if ensured != nil {
+		if _, ok := ensured[remotePath]; ok {
+			return nil
+		}
+	}
+	if opts.DryRun {
+		ui.Infof("mkdir remote %s", remotePath)
+		if ensured != nil {
+			ensured[remotePath] = struct{}{}
+		}
+		return nil
+	}
+	if err := s.Client.EnsureDir(ctx, remotePath); err != nil {
+		return err
+	}
+	if ensured != nil {
+		ensured[remotePath] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Syncer) remoteEntryMap(ctx context.Context, root string) (map[string]model.Entry, error) {
+	entries, err := s.walk(ctx, root)
+	if err != nil {
+		if api.IsNotFound(err) {
+			return map[string]model.Entry{}, nil
+		}
+		return nil, err
+	}
+	result := make(map[string]model.Entry, len(entries))
+	for _, entry := range entries {
+		if entry.Path == "" {
+			continue
+		}
+		result[entry.Path] = entry
+	}
+	return result, nil
+}
+
+func contentTypeForFile(path string) string {
+	ext := filepath.Ext(path)
+	if ext == "" {
+		return "application/octet-stream"
+	}
+	mimeType := mime.TypeByExtension(ext)
+	if mimeType == "" {
+		return "application/octet-stream"
+	}
+	return mimeType
+}
+
+func inferLocalRootRelative(localPath string) (string, bool) {
+	if localPath == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(localPath)
+	root := findMarkerRoot(cleaned)
+	if root == "" {
+		root = findNamedRoot(cleaned, "hidrive-sync")
+	}
+	if root == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, cleaned)
+	if err != nil || rel == "." || rel == "" {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func findMarkerRoot(localPath string) string {
+	current := localPath
+	if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+		current = filepath.Dir(localPath)
+	}
+	for {
+		marker := filepath.Join(current, ".hidrive-sync-root")
+		if info, err := os.Stat(marker); err == nil && !info.IsDir() {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
+func findNamedRoot(localPath, name string) string {
+	parts := strings.Split(filepath.ToSlash(localPath), "/")
+	last := -1
+	for i, part := range parts {
+		if part == name {
+			last = i
+		}
+	}
+	if last <= 0 {
+		return ""
+	}
+	return filepath.FromSlash(strings.Join(parts[:last+1], "/"))
 }
 
 func localMatchesRemote(entry model.Entry, info os.FileInfo) bool {
@@ -498,8 +861,8 @@ func finalizeSync(state *SyncState, report syncReport, opts Options) error {
 			return err
 		}
 	}
-	ui.Infof("sync summary: downloaded=%d skipped=%d conflicts=%d deleted=%d errors=%d",
-		report.Downloaded, report.Skipped, report.Conflicts, report.Deleted, report.Errors)
+	ui.Infof("sync summary: downloaded=%d uploaded=%d skipped=%d conflicts=%d deleted=%d errors=%d",
+		report.Downloaded, report.Uploaded, report.Skipped, report.Conflicts, report.Deleted, report.Errors)
 	if report.Errors > 0 {
 		return errors.New("sync completed with errors")
 	}
