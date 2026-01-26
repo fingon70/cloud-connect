@@ -23,7 +23,7 @@ import (
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(2)
+		os.Exit(0)
 	}
 
 	switch os.Args[1] {
@@ -41,8 +41,11 @@ func main() {
 		handleComplete(os.Args[2:])
 	case "whoami":
 		handleWhoAmI(os.Args[2:])
+	case "config":
+		handleConfig(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -58,6 +61,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  hidrive sync <remote-path> <local-dir> [--dry-run] [--delete] [--report <path>]")
 	fmt.Fprintln(os.Stderr, "  hidrive sync <local-path> <remote-path> [--upload] [--dry-run] [--report <path>]")
 	fmt.Fprintln(os.Stderr, "  hidrive download <remote-file> <local-path>")
+	fmt.Fprintln(os.Stderr, "  hidrive config init")
+	fmt.Fprintln(os.Stderr, "  hidrive config save")
 	fmt.Fprintln(os.Stderr, "  hidrive completion <bash|zsh|fish>")
 	fmt.Fprintln(os.Stderr, "  hidrive whoami")
 }
@@ -111,6 +116,54 @@ func handleAuth(args []string) {
 		ui.Infof("token valid until %s", token.Expiry.Format(time.RFC3339))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown auth subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func handleConfig(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "config requires a subcommand: init or save")
+		os.Exit(2)
+	}
+
+	switch args[0] {
+	case "init":
+		cfg, err := config.Load()
+		if err != nil {
+			ui.Errorf("failed to load config: %v", err)
+			os.Exit(1)
+		}
+		updated, err := config.PromptMissing(&cfg, os.Stdin, os.Stdout)
+		if err != nil {
+			ui.Errorf("failed to read config values: %v", err)
+			os.Exit(1)
+		}
+		if err := config.Save(cfg); err != nil {
+			ui.Errorf("failed to save config: %v", err)
+			os.Exit(1)
+		}
+		if updated {
+			ui.Infof("config saved")
+		} else {
+			ui.Infof("config saved (no new values)")
+		}
+	case "save":
+		cfg, err := config.Load()
+		if err != nil {
+			ui.Errorf("failed to load config: %v", err)
+			os.Exit(1)
+		}
+		if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientSecret) == "" {
+			ui.Errorf("missing credentials (set env vars or run: hidrive config init)")
+			os.Exit(2)
+		}
+		if err := config.Save(cfg); err != nil {
+			ui.Errorf("failed to save config: %v", err)
+			os.Exit(1)
+		}
+		ui.Infof("config saved")
+	default:
+		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		os.Exit(2)
 	}
 }
@@ -588,13 +641,16 @@ _hidrive_complete() {
   cmd="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "auth ls sync download whoami completion" -- "$cur") )
+    COMPREPLY=( $(compgen -W "auth ls sync download whoami config completion" -- "$cur") )
     return 0
   fi
 
   case "$cmd" in
     auth)
       COMPREPLY=( $(compgen -W "login status" -- "$cur") )
+      ;;
+    config)
+      COMPREPLY=( $(compgen -W "init save" -- "$cur") )
       ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
@@ -651,7 +707,7 @@ _hidrive_remote() {
 
 _hidrive() {
   if (( CURRENT == 2 )); then
-    _values 'command' auth ls sync download whoami completion
+    _values 'command' auth ls sync download whoami config completion
     return
   fi
 
@@ -659,6 +715,9 @@ _hidrive() {
   case $cmd in
     auth)
       _values 'auth' login status
+      ;;
+    config)
+      _values 'config' init save
       ;;
     completion)
       _values 'shell' bash zsh fish
@@ -703,8 +762,9 @@ const fishCompletion = `function __hidrive_remote_paths
   hidrive __complete "$cur" 2>/dev/null
 end
 
-complete -c hidrive -n 'not __fish_seen_subcommand_from auth ls sync download whoami completion' -a 'auth ls sync download whoami completion'
+complete -c hidrive -n 'not __fish_seen_subcommand_from auth ls sync download whoami config completion' -a 'auth ls sync download whoami config completion'
 complete -c hidrive -n '__fish_seen_subcommand_from auth' -a 'login status'
+complete -c hidrive -n '__fish_seen_subcommand_from config' -a 'init save'
 complete -c hidrive -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 
 complete -c hidrive -n '__fish_seen_subcommand_from ls; and string match -q -- "--*" (commandline -ct)' -l long -l json -l recursive
