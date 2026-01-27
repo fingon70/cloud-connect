@@ -40,3 +40,10 @@ For pull requests:
 
 ## Security & Configuration Tips
 If configuration or secrets are introduced, document expected environment variables and provide a safe example file (for example: `.env.example`). Never commit real secrets.
+
+## Session Notes (2026-01-27)
+- Added CLI commands: `hidrive config init` and `hidrive config save`.
+- Help now prints and exits 0 for no args or `--help`.
+- Shell completions updated to include `config`.
+- Tests: `make test` passed.
+- Commit: `feat: add config commands and help exit` (hash `8d8b387`).
